@@ -1,0 +1,221 @@
+local replicatedstorage = game:GetService("ReplicatedStorage")
+local players = game:GetService("Players")
+local localplayer = players.LocalPlayer
+local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
+local bytenet = require(replicatedstorage:WaitForChild("Teawork"):WaitForChild("Shared"):WaitForChild("Services"):WaitForChild("ByteNetworking"))
+
+local window = library:CreateWindow({
+    Title = "Safe Macro RECORDER",
+    Size = UDim2.new(0, 300, 0, 250),
+    Position = UDim2.new(0.5, 0, 0, 70),
+    NoResize = false
+})
+window:Center()
+
+local rectab = window:CreateTab({ Name = "Recorder", Visible = true })
+window:ShowTab(rectab)
+
+local statusLabel = rectab:Label({ Text = "Status: Idle" })
+
+-- // STATE VARIABLES // --
+local recording = false
+local startTime = 0
+local recordedActions = {}
+local placedCount = 0
+
+-- // HELPER FUNCTIONS // --
+
+local function getCash()
+    local cashObj = localplayer:WaitForChild("leaderstats", 5):WaitForChild("Cash", 5)
+    if cashObj then
+        local clean = string.gsub(cashObj.Value, "%D", "") 
+        return tonumber(clean) or 0
+    end
+    return 0
+end
+
+local function getTime()
+    if not recording then return 0 end
+    return math.floor((os.time() - startTime) * 10) / 10 -- 1 decimal place
+end
+
+local function getWave()
+    local mapinfo = replicatedstorage:FindFirstChild("RoundInfo")
+    if mapinfo then
+        return mapinfo:GetAttribute("Wave") or 1
+    end
+    return 1
+end
+
+local function formatVector(v3)
+    return string.format("Vector3.new(%.4f, %.4f, %.4f)", v3.X, v3.Y, v3.Z)
+end
+
+-- // HOOKS (The Magic) // --
+
+local function setupHooks()
+    -- Hook Place Tower
+    local oldPlace = bytenet.Towers.PlaceTower.invoke
+    bytenet.Towers.PlaceTower.invoke = function(args)
+        if not recording then return oldPlace(args) end
+
+        local preCash = getCash()
+        local result = oldPlace(args)
+        local postCash = getCash()
+        
+        -- Calculate Cost dynamically
+        local cost = preCash - postCash
+        if cost < 0 then cost = 0 end -- Lag protection
+
+        placedCount = placedCount + 1
+        
+        table.insert(recordedActions, {
+            type = "Place",
+            tower = args.TowerID,
+            pos = args.Position,
+            cost = cost,
+            time = getTime(),
+            wave = getWave()
+        })
+        
+        statusLabel:SetText("Recorded: Place " .. args.TowerID)
+        return result
+    end
+
+    -- Hook Upgrade Tower
+    local oldUpgrade = bytenet.Towers.UpgradeTower.invoke
+    bytenet.Towers.UpgradeTower.invoke = function(uid)
+        if not recording then return oldUpgrade(uid) end
+
+        local preCash = getCash()
+        local result = oldUpgrade(uid)
+        local postCash = getCash()
+
+        local cost = preCash - postCash
+        if cost < 0 then cost = 0 end
+
+        -- Convert absolute UID to relative index (Safe Macro uses relative 1, 2, 3...)
+        -- Note: This assumes UIDs are sequential 1,2,3. If they aren't, this logic needs adjustment.
+        -- Usually in this game, UID = Placement Order.
+        local relativeIndex = uid 
+
+        table.insert(recordedActions, {
+            type = "Upgrade",
+            uid = relativeIndex,
+            cost = cost,
+            time = getTime(),
+            wave = getWave()
+        })
+
+        statusLabel:SetText("Recorded: Upgrade #" .. uid)
+        return result
+    end
+
+    -- Hook Sell Tower
+    local oldSell = bytenet.Towers.SellTower.invoke
+    bytenet.Towers.SellTower.invoke = function(uid)
+        if not recording then return oldSell(uid) end
+        
+        return oldSell(uid) -- We don't record sells yet in this basic version, or we can add it below:
+        
+        -- table.insert(recordedActions, { type = "Sell", uid = uid, time = getTime(), wave = getWave() })
+    end
+    
+    -- Hook Difficulty
+    local oldVote = bytenet.DifficultyVote.Vote.send
+    bytenet.DifficultyVote.Vote.send = function(diff)
+        if recording then
+             -- Reset timer on vote usually
+            startTime = os.time() 
+            table.insert(recordedActions, { type = "Diff", diff = diff })
+        end
+        return oldVote(diff)
+    end
+    
+    -- Hook Ready
+    local oldReady = bytenet.ReadyVote.Vote.send
+    bytenet.ReadyVote.Vote.send = function(bool)
+        if recording and bool then
+            table.insert(recordedActions, { type = "Ready", time = getTime(), wave = getWave() })
+        end
+        return oldReady(bool)
+    end
+
+    -- Hook AutoSkip
+    local oldAuto = bytenet.SkipWave.ToggleAutoSkip.send
+    bytenet.SkipWave.ToggleAutoSkip.send = function(bool)
+        if recording then
+            table.insert(recordedActions, { type = "AutoSkip", val = bool, time = getTime(), wave = getWave() })
+        end
+        return oldAuto(bool)
+    end
+end
+
+-- // UI BUTTONS // --
+
+rectab:Button({
+    Text = "Start Recording",
+    Callback = function()
+        recordedActions = {}
+        placedCount = 0
+        startTime = os.time()
+        recording = true
+        setupHooks()
+        statusLabel:SetText("Status: Recording...")
+    end
+})
+
+rectab:Button({
+    Text = "Save Strat (Workspace)",
+    Callback = function()
+        recording = false
+        statusLabel:SetText("Status: Saving...")
+        
+        local output = {}
+        
+        -- Header
+        table.insert(output, "local api = loadstring(game:HttpGet('YOUR_PASTEBIN_LINK_HERE'))()")
+        table.insert(output, "")
+        
+        -- Get current loadout
+        local loadoutStr = "api:Loadout({ "
+        -- We try to guess loadout or leave it blank for user
+        table.insert(output, "-- Manually check your loadout below:")
+        table.insert(output, "api:Loadout({'Tower1', 'Tower2', 'Tower3', 'Tower4', 'Tower5'})") 
+        table.insert(output, "api:Map('MapName', {})")
+        table.insert(output, "")
+        table.insert(output, "api:Start()")
+        table.insert(output, "")
+        table.insert(output, "api:Loop(function()")
+        
+        for _, action in ipairs(recordedActions) do
+            if action.type == "Diff" then
+                table.insert(output, string.format("\tapi:Difficulty('%s')", action.diff))
+            elseif action.type == "Place" then
+                -- Format: api:Place(Tower, Pos, COST, Time, Wave)
+                table.insert(output, string.format("\tapi:Place('%s', %s, %d, %.1f, %d)", 
+                    action.tower, formatVector(action.pos), action.cost, action.time, action.wave))
+            elseif action.type == "Upgrade" then
+                -- Format: api:Upgrade(Index, COST, Time, Wave)
+                table.insert(output, string.format("\tapi:Upgrade(%d, %d, %.1f, %d)", 
+                    action.uid, action.cost, action.time, action.wave))
+            elseif action.type == "Ready" then
+                table.insert(output, string.format("\tapi:Ready(%.1f, %d)", action.time, action.wave))
+            elseif action.type == "AutoSkip" then
+                table.insert(output, string.format("\tapi:AutoSkip(%s, %.1f, %d)", tostring(action.val), action.time, action.wave))
+            end
+        end
+        
+        table.insert(output, "\tapi:PlayAgain()")
+        table.insert(output, "end)")
+        
+        local finalString = table.concat(output, "\n")
+        writefile("RecordedStrat.txt", finalString)
+        
+        statusLabel:SetText("Saved to RecordedStrat.txt")
+        print(finalString) -- Print to console too
+    end
+})
+
+-- Initialize
+statusLabel:SetText("Status: Ready to Record")
